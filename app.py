@@ -7,29 +7,59 @@ from pydantic import BaseModel
 
 import os
 from dotenv import load_dotenv
-from pymongo import MongoClient
+from pymongo import ASCENDING, MongoClient
+from datetime import datetime, timezone
 
 load_dotenv()
-client = MongoClient(os.getenv("MONGODB_URI"))
+client = MongoClient(os.getenv("MONGODB_URI"), tz_aware=True)
 db = client["ecse3038"]
+readings = db["readings"]
 devices = db["devices"]
 
 app = FastAPI()
 
+class Reading(BaseModel):
+    mac: str
+    temp: float
+
 
 class Device(BaseModel):
-    name: str
-    room: str
-    temp: float
-    online: bool
+    mac: str
+    name: str | None = None
+    room: str | None = None
+
+devices.create_index([("mac", ASCENDING)], unique=True)
+
+#@app.get("/devices/{mac}")
 
 
-readings = []
 
 
-@app.get("/devices")
+
+@app.get("/devices/{mac}")
 def get_devices():
     return list(devices.find({}, {"_id": 0}))
+
+
+@app.get("/readings")
+def get_readings(mac: str | None = None, limit: int = 10, since: datetime | None = None):
+    query = {}
+    if mac is not None:
+        query["mac"] = mac
+    if since is not None:
+        query["time"] = {"$gte": since}
+    return list(readings.find(query, {"_id": 0})
+                        .sort("time", -1).limit(limit))
+
+@app.get("/readings/latest")
+def get_latest_reading(mac: str | None = None):
+    query = {}
+    if mac is not None:
+        query["mac"] = mac
+    reading = readings.find_one(query, {"_id": 0}, sort=[("time", -1)])
+    if reading is None:
+        raise HTTPException(status_code=404, detail="No readings yet")
+    return reading
 
 
 @app.get("/devices/{name}")
@@ -55,3 +85,14 @@ def create_device(device: Device):
     devices.insert_one(new_device)
     new_device.pop("_id")
     return new_device
+
+@app.post("/readings", status_code=201)
+def create_reading(reading: Reading):
+    if devices.find_one({"mac": reading.mac}) is None:
+        raise HTTPException(status_code=404,
+            detail="No device with MAC " + reading.mac)
+    new_reading = reading.model_dump()
+    new_reading["time"] = datetime.now(timezone.utc)
+    readings.insert_one(new_reading)
+    new_reading.pop("_id")
+    return new_reading
